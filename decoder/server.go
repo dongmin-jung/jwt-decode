@@ -33,6 +33,8 @@ type Server struct {
 	jwksURL                 string
 	clientset               *kubernetes.Clientset
 	cachedTokenMap          map[string]CachedToken
+	validateAPIPaths        string
+	usernameClaim           string
 }
 
 type CachedToken struct {
@@ -42,9 +44,9 @@ type CachedToken struct {
 
 // NewServer returns a new server that will decode the header with key authHeaderKey
 // with the given TokenDecoder decoder.
-func NewServer(decoder TokenDecoder, authHeaderKey, tokenValidatedHeaderKey string, multiClusterPrefix string, jwksURL string, clientset *kubernetes.Clientset, secretCacheTTL int64) *Server {
+func NewServer(decoder TokenDecoder, authHeaderKey, tokenValidatedHeaderKey string, multiClusterPrefix string, jwksURL string, clientset *kubernetes.Clientset, secretCacheTTL int64, validateAPIPaths string, usernameClaim string) *Server {
 	cachedTokenMap := map[string]CachedToken{}
-	return &Server{decoder: decoder, authHeaderKey: authHeaderKey, tokenValidatedHeaderKey: tokenValidatedHeaderKey, multiClusterPrefix: multiClusterPrefix, jwksURL: jwksURL, clientset: clientset, cachedTokenMap: cachedTokenMap, secretCacheTTL: secretCacheTTL}
+	return &Server{decoder: decoder, authHeaderKey: authHeaderKey, tokenValidatedHeaderKey: tokenValidatedHeaderKey, multiClusterPrefix: multiClusterPrefix, jwksURL: jwksURL, clientset: clientset, cachedTokenMap: cachedTokenMap, secretCacheTTL: secretCacheTTL, validateAPIPaths: validateAPIPaths, usernameClaim: usernameClaim}
 }
 
 // DecodeToken http handler
@@ -86,22 +88,32 @@ func (s *Server) DecodeToken(rw http.ResponseWriter, r *http.Request) {
 	json.Unmarshal(tokenByteArr, &decodedTokenMap)
 	issuer := decodedTokenMap["iss"].(string)
 
-	isServiceAccountToken := issuer == "kubernetes/serviceaccount"
-	isHyperAuthToken := strings.Contains(s.jwksURL, issuer)
-	isPrometheus := (strings.Contains(uri, "/api/prometheus/")) || (strings.Contains(uri, "/api/prometheus-tenancy/")) || (strings.Contains(uri, "/api/alertmanager/"))
-	isHyperCloudAPIServer := (strings.Contains(uri, "/api/hypercloud/")) || (strings.Contains(uri, "/api/multi-hypercloud/"))
+	isSAToken := issuer == "kubernetes/serviceaccount"
+
+	parsedJwksURL, _ := url.Parse(s.jwksURL)
+	isOIDCToken := strings.Contains(s.jwksURL, issuer) && strings.Contains(issuer, parsedJwksURL.Scheme+"://"+parsedJwksURL.Host)
+
 	isMultiCluster := strings.Split(r.Header.Clone().Get("X-Forwarded-Host"), ".")[0] == s.multiClusterPrefix
 
-	if !isServiceAccountToken && !isHyperAuthToken {
+	var needSATokenValidation bool
+
+	for _, path := range strings.Split(s.validateAPIPaths, ",") {
+		if strings.Contains(uri, path) {
+			needSATokenValidation = true
+			break
+		}
+	}
+
+	if !isSAToken && !isOIDCToken {
 		log.Warn().Err(err).Int(statusKey, http.StatusUnauthorized).Msgf("token with unknown issuer.")
 		rw.WriteHeader(http.StatusUnauthorized)
 		return
 	}
 
-	if isServiceAccountToken {
+	if isSAToken {
 		log.Debug().Msgf("received request uri %s with service account token.", uri)
 
-		if isPrometheus || isHyperCloudAPIServer {
+		if needSATokenValidation {
 			namespace := decodedTokenMap["kubernetes.io/serviceaccount/namespace"].(string)
 			secretname := decodedTokenMap["kubernetes.io/serviceaccount/secret.name"].(string)
 
@@ -144,9 +156,9 @@ func (s *Server) DecodeToken(rw http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if isHyperAuthToken {
+	if isOIDCToken {
 
-		if isMultiCluster || isPrometheus || isHyperCloudAPIServer {
+		if isMultiCluster || needSATokenValidation {
 			t, err := s.decoder.Decode(ctx, authToken)
 
 			if err != nil {
@@ -171,11 +183,11 @@ func (s *Server) DecodeToken(rw http.ResponseWriter, r *http.Request) {
 			log.Debug().Msgf("request to remote cluster %s.", strings.Split(uri, "/")[3])
 
 			re, _ := regexp.Compile("[" + regexp.QuoteMeta(`!#$%&'"*+-/=?^_{|}~().,:;<>[]\`) + "`\\s" + "]")
-			email := decodedTokenMap["email"].(string)
-			emailEscaped := re.ReplaceAllString(strings.Replace(email, "@", "-at-", -1), "-")
+			username := decodedTokenMap[s.usernameClaim].(string)
+			usernameEscaped := re.ReplaceAllString(strings.Replace(username, "@", "-at-", -1), "-")
 			namespace := strings.Split(uri, "/")[2]
 			clustername := strings.Split(uri, "/")[3]
-			secretname := emailEscaped + "-" + clustername + "-token"
+			secretname := usernameEscaped + "-" + clustername + "-token"
 
 			cachedToken, exists := s.cachedTokenMap[namespace+":"+secretname]
 

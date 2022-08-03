@@ -50,6 +50,10 @@ const (
 	CacheEnabledEnv             = "CACHE_ENABLED"
 	CacheEnabledDefault         = "true"
 	ClaimMappingsEnv            = "CLAIM_MAPPINGS"
+	UsernameClaimEnv            = "OIDC_USERNAME_CLAIM"
+	UsernameClaimDefault        = "preferred_username"
+	ValidateAPIPathsEnv         = "VALIDATE_API_PATHS"
+	ValidateAPIPathsDefault     = "/api/prometheus/,/api/prometheus-tenancy/,/api/alertmanager/,/api/hypercloud/,/api/multi-hypercloud/"
 )
 
 // NewConfig creates a new Config from the current env
@@ -67,6 +71,8 @@ func NewConfig() *Config {
 	c.logType = withDefault(LogTypeEnv, LogTypeDefault)
 	c.maxCacheKeys = withDefault(MaxCacheKeysEnv, MaxCacheKeysDefault)
 	c.cacheEnabled = withDefault(CacheEnabledEnv, CacheEnabledDefault)
+	c.usernameClaim = withDefault(UsernameClaimEnv, UsernameClaimDefault)
+	c.validateAPIPaths = withDefault(ValidateAPIPathsEnv, ValidateAPIPathsDefault)
 	c.claimMappings = optional(ClaimMappingsEnv)
 	c.keyCost = 100
 	return &c
@@ -87,6 +93,8 @@ type Config struct {
 	maxCacheKeys         envVar
 	cacheEnabled         envVar
 	claimMappings        envVar
+	usernameClaim        envVar
+	validateAPIPaths     envVar
 	keyCost              int64
 }
 
@@ -158,7 +166,7 @@ func (c *Config) getServer(r *prom.Registry) *decoder.Server {
 	if err != nil {
 		log.Warn().Err(err).Msg("unable to convert string to int64.")
 	}
-	return decoder.NewServer(dec, c.authHeader.get(), c.tokenValidatedHeader.get(), c.multiClusterPrefix.get(), c.jwksURL.get(), clientset, secretCacheTTL)
+	return decoder.NewServer(dec, c.authHeader.get(), c.tokenValidatedHeader.get(), c.multiClusterPrefix.get(), c.jwksURL.get(), clientset, secretCacheTTL, c.validateAPIPaths.get(), c.usernameClaim.get())
 }
 
 func (c *Config) getLogger() (logger zerolog.Logger) {
